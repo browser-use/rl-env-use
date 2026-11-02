@@ -219,3 +219,8 @@ def test_second_review_grading_cases(task, pred, ok):
 @pytest.mark.parametrize('pred', ['1.5', 'not 60%', 'No, 0.8'])
 def test_prob_rejects_unreadable_numbers(pred):
 	assert grade_answer({'answer_type': 'prob', 'answer': 'yes'}, pred) == 0.0
+
+
+@pytest.mark.parametrize('pred, score', [('1' * 4301 + '/' + '1' * 4301, 1.0), ('1/' + '1' * 4301, 0.0), ('1' * 4301 + '/1', 0.0)])
+def test_prob_overlong_fraction_does_not_raise(pred, score):
+	assert grade_answer({'answer_type': 'prob', 'answer': 'yes'}, pred) == score

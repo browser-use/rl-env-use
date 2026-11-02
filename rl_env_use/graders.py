@@ -4,6 +4,8 @@ Every grader fails closed on hedging: an answer offering several candidates neve
 import re
 import unicodedata
 from datetime import date, datetime
+from decimal import Decimal
+from fractions import Fraction
 
 _ARTICLES = re.compile(r'^(a|an|the)\s+')  # a leading article only: 'Vitamin A' is not 'Vitamin'
 _NUM = re.compile(r'[-+]?\d[\d,_]*(?:\.\d+)?|[-+]?\.\d+')
@@ -191,7 +193,8 @@ def prob_of(pred) -> float | None:
 	if w in ('yes', 'no', 'true', 'false'):
 		return 1.0 if w in ('yes', 'true') else 0.0
 	if f := re.fullmatch(r'\s*(\d+)\s*/\s*(\d+)\s*', str(pred)):  # 7/10
-		return int(f.group(1)) / int(f.group(2)) if 0 < int(f.group(2)) and int(f.group(1)) <= int(f.group(2)) else None
+		a, b = (Fraction(Decimal(g)) for g in f.groups())  # Decimal parses past Python's int digit limit
+		return float(a / b) if 0 < b and a <= b else None
 	text = str(pred).lower()
 	if re.search(r'\b(not|no)\b', text) and re.search(r'\d', text):  # 'not 60%', 'No, 0.8': which way is meant is unclear
 		return None
