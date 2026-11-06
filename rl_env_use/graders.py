@@ -4,7 +4,7 @@ Every grader fails closed on hedging: an answer offering several candidates neve
 import re
 import unicodedata
 from datetime import date, datetime
-from urllib.parse import unquote_plus
+from urllib.parse import parse_qsl, unquote
 
 _ARTICLES = re.compile(r'^(a|an|the)\s+')  # a leading article only: 'Vitamin A' is not 'Vitamin'
 _NUM = re.compile(r'[-+]?\d[\d,_]*(?:\.\d+)?|[-+]?\.\d+')
@@ -248,6 +248,10 @@ def visited_urls(trace: list[dict]) -> list[str]:
 READ_ACTIONS = {'extract', 'find_text', 'search_page', 'find_elements', 'dropdown_options', 'scroll'}
 # Domains where anyone can publish: a page there only reads a source in the same owner/repo, never someone else's copy.
 SHARED_HOSTS = {'github.com', 'gist.github.com', 'api.github.com', 'gitlab.com', 'huggingface.co'}
+# GitLab project pages that predate the /-/ separator (gitlab.com/group/sub/project/blob/main/x)
+_GITLAB_PAGES = {'blob', 'tree', 'raw', 'blame', 'commits', 'commit', 'tags', 'releases', 'issues', 'merge_requests', 'wikis', 'pipelines', 'jobs', 'compare'}
+# query parameters that hold what the policy typed into a search box
+SEARCH_PARAMS = {'q', 'query', 'search', 'search_query', 'searchterm', 'term', 'terms', 'keyword', 'keywords', 'k', 'kw', 'text', 'wd'}
 
 
 def _observations(trace: list[dict]) -> list[tuple[str, str, str]]:
@@ -268,8 +272,14 @@ def _observations(trace: list[dict]) -> list[tuple[str, str, str]]:
 
 def _space(k: str) -> str:
 	"""The owner/repo a page on a shared host belongs to: github.com/o/r/blob/x and api.github.com/repos/o/r -> github.com/o/r,
-	huggingface.co/api/datasets/o/n -> huggingface.co/datasets/o/n."""
+	huggingface.co/api/datasets/o/n -> huggingface.co/datasets/o/n, gitlab.com/g/sub/p/-/blob/x and
+	gitlab.com/api/v4/projects/g%2Fsub%2Fp/... -> gitlab.com/g/sub/p (GitLab nests groups, so the whole namespace counts)."""
 	p = k.split('/')
+	if p[0] == 'gitlab.com':
+		if p[1:4] == ['api', 'v4', 'projects'] and len(p) > 4:
+			return 'gitlab.com/' + unquote(p[4]).strip('/')
+		end = next((i for i in range(3, len(p)) if p[i] == '-' or p[i] in _GITLAB_PAGES), len(p))
+		return '/'.join(p[:end])
 	if p[0] == 'api.github.com' and p[1:2] == ['repos']:
 		p = ['github.com', *p[2:]]
 	if p[0] == 'huggingface.co' and p[1:2] == ['api']:
@@ -280,8 +290,8 @@ def _space(k: str) -> str:
 def grounded(evidence: list[dict], trace: list[dict]) -> bool:
 	"""Every fact the answer needs was read at its source. A fact counts as read if the agent observed exactly its
 	source page (where the value was verified at scout time), or page content it extracted on that page, a sub-page,
-	or a listing or official API on the same site contains the value. On a shared host (github.com, huggingface.co) the same site
-	means the same owner/repo. Search snippets, third-party copies and the policy's own outputs never count."""
+	or a listing or official API on the same site contains the value. On a shared host (github.com, gitlab.com, huggingface.co)
+	the same site means the same owner/repo. Search snippets, third-party copies and the policy's own outputs never count."""
 	seen = {page_key(u) for u in visited_urls(trace)}
 	# plain sub-pages (e.g. a dataset's /viewer) of a specific source page; no query strings (issues/new?title=ANSWER),
 	# no create/edit/search actions, and never under a bare site root
@@ -303,14 +313,22 @@ def grounded(evidence: list[dict], trace: list[dict]) -> bool:
 		return host(k) == host(s)
 
 	def has(v, text) -> bool:
+		if not norm(v):
+			return False  # a value with nothing left after normalizing ('-', '?') is never shown
 		d = dates(v)
 		return f' {norm(v)} ' in f' {norm(text)} ' or (len(d) == 1 and d[0] in dates(text))
+
+	def echoes(v, u) -> bool:
+		"""The page's own URL carries the value, so the page may only print the policy's query back: the value is in what
+		was typed into a search box, or a value of 4+ characters is in any query parameter. ?page=2 does not echo '2'."""
+		params = parse_qsl(u.split('#')[0].partition('?')[2], keep_blank_values=True)
+		typed = ' '.join(x for name, x in params if name.lower() in SEARCH_PARAMS)
+		return has(v, typed) or (len(norm(v)) >= 4 and has(v, ' '.join(x for _, x in params)))
 
 	def shown(v, s) -> bool:
 		if not v:
 			return False
-		# a page whose own URL carries the value (a search for the answer) only echoes the policy's query back
-		raw = ' '.join(txt for k, txt, u in obs if same_site(k, s) and not has(v, unquote_plus(u.partition('?')[2])))
+		raw = ' '.join(txt for k, txt, u in obs if same_site(k, s) and not echoes(v, u))
 		return has(v, raw)
 
 	def ok(e):
