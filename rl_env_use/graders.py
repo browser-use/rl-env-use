@@ -4,6 +4,7 @@ Every grader fails closed on hedging: an answer offering several candidates neve
 import re
 import unicodedata
 from datetime import date, datetime
+from urllib.parse import unquote_plus
 
 _ARTICLES = re.compile(r'^(a|an|the)\s+')  # a leading article only: 'Vitamin A' is not 'Vitamin'
 _NUM = re.compile(r'[-+]?\d[\d,_]*(?:\.\d+)?|[-+]?\.\d+')
@@ -245,29 +246,42 @@ def visited_urls(trace: list[dict]) -> list[str]:
 # Actions whose result is page content the agent read. Never `done`/`input`/`write_file`: those echo the policy's
 # own text, and counting them would let it ground itself.
 READ_ACTIONS = {'extract', 'find_text', 'search_page', 'find_elements', 'dropdown_options', 'scroll'}
+# Domains where anyone can publish: a page there only reads a source in the same owner/repo, never someone else's copy.
+SHARED_HOSTS = {'github.com', 'gist.github.com', 'api.github.com', 'gitlab.com', 'huggingface.co'}
 
 
-def _observations(trace: list[dict]) -> list[tuple[str, str]]:
-	"""(page_key, text) for every page-content result, attributed to the page the agent was on at that step."""
-	out, page, pending = [], None, []
+def _observations(trace: list[dict]) -> list[tuple[str, str, str]]:
+	"""(page_key, text, url) for every page-content result, attributed to the page the agent was on at that step."""
+	out, url, pending = [], None, []
 	for t in trace:
 		if t['role'] == 'assistant':
 			m = re.match(r'\[step \d+ @ (\S+)\]', t['content'])
-			page, pending = (page_key(m.group(1)) if m else page), []
+			url, pending = (m.group(1) if m else url), []
 		elif t['role'] == 'tool_call':
 			pending.append(t.get('name'))
 		elif t['role'] == 'tool_result':
 			name = pending.pop(0) if pending else None
-			if page and name in READ_ACTIONS:
-				out.append((page, str(t['content'])))
+			if url and name in READ_ACTIONS:
+				out.append((page_key(url), str(t['content']), url))
 	return out
+
+
+def _space(k: str) -> str:
+	"""The owner/repo a page on a shared host belongs to: github.com/o/r/blob/x and api.github.com/repos/o/r -> github.com/o/r,
+	huggingface.co/api/datasets/o/n -> huggingface.co/datasets/o/n."""
+	p = k.split('/')
+	if p[0] == 'api.github.com' and p[1:2] == ['repos']:
+		p = ['github.com', *p[2:]]
+	if p[0] == 'huggingface.co' and p[1:2] == ['api']:
+		p = [p[0], *p[3 if p[2:3] == ['models'] else 2 :]]
+	return '/'.join(p[: 4 if p[1:2] in (['datasets'], ['spaces']) else 3])
 
 
 def grounded(evidence: list[dict], trace: list[dict]) -> bool:
 	"""Every fact the answer needs was read at its source. A fact counts as read if the agent observed exactly its
 	source page (where the value was verified at scout time), or page content it extracted on that page, a sub-page,
-	or a listing or official API on the same site contains the value. Search snippets, third-party copies and the policy's own
-	outputs never count."""
+	or a listing or official API on the same site contains the value. On a shared host (github.com, huggingface.co) the same site
+	means the same owner/repo. Search snippets, third-party copies and the policy's own outputs never count."""
 	seen = {page_key(u) for u in visited_urls(trace)}
 	# plain sub-pages (e.g. a dataset's /viewer) of a specific source page; no query strings (issues/new?title=ANSWER),
 	# no create/edit/search actions, and never under a bare site root
@@ -280,10 +294,24 @@ def grounded(evidence: list[dict], trace: list[dict]) -> bool:
 		lab = k.split('/')[0].split('.')
 		return '.'.join(lab[-3:] if len(lab) > 2 and len(lab[-1]) == 2 and lab[-2] in ('co', 'ac', 'gov', 'org', 'com', 'edu') else lab[-2:])
 
+	def same_site(k, s) -> bool:
+		h = k.split('/')[0]
+		if h in SHARED_HOSTS:
+			return _space(k) == _space(s)
+		if h.endswith('.github.io'):
+			return h == s.split('/')[0]
+		return host(k) == host(s)
+
+	def has(v, text) -> bool:
+		d = dates(v)
+		return f' {norm(v)} ' in f' {norm(text)} ' or (len(d) == 1 and d[0] in dates(text))
+
 	def shown(v, s) -> bool:
-		raw = ' '.join(txt for k, txt in obs if host(k) == host(s))
-		d = dates(v) if v else []
-		return bool(v) and (f' {norm(v)} ' in f' {norm(raw)} ' or (len(d) == 1 and d[0] in dates(raw)))
+		if not v:
+			return False
+		# a page whose own URL carries the value (a search for the answer) only echoes the policy's query back
+		raw = ' '.join(txt for k, txt, u in obs if same_site(k, s) and not has(v, unquote_plus(u.partition('?')[2])))
+		return has(v, raw)
 
 	def ok(e):
 		s = page_key(e['url'])

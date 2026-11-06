@@ -115,6 +115,28 @@ def test_grounded_resists_self_grounding_and_url_tricks():
 	)
 
 
+def test_grounded_needs_the_sources_own_repo_and_not_an_echo_of_the_query():
+	"""On a shared host only the source's own owner/repo counts, and a page whose URL carries the answer only echoes it back."""
+	from rl_env_use.graders import grounded
+
+	def read(url, text):
+		return [{'role': 'assistant', 'content': f'[step 0 @ {url}]'}, {'role': 'tool_call', 'name': 'extract', 'content': '{}'}, {'role': 'tool_result', 'content': text}]
+
+	repo = [{'url': 'https://github.com/owner/repo', 'value': '643'}]
+	assert not grounded(repo, read('https://github.com/search?q=643&type=repositories', 'Search results for "643": 0 repositories'))
+	assert not grounded(repo, read('https://github.com/someone/awesome-agents', 'owner/repo (643 tasks), Mind2Web ...'))  # third-party copy
+	assert not grounded(repo, read('https://gist.github.com/policy/1a2b', 'notes: repo has 643 tasks'))  # the policy's own gist
+	assert not grounded(repo, read('https://someone.github.io/list', 'owner/repo: 643 tasks'))
+	assert grounded(repo, read('https://github.com/owner/repo/tree/main/data', 'tasks.jsonl (643 tasks)'))  # the source's own repo still counts
+	assert grounded(repo, read('https://api.github.com/repos/owner/repo/readme', 'The benchmark has 643 tasks'))  # and its official API
+	hf = [{'url': 'https://huggingface.co/datasets/McGill-NLP/WebLINX', 'value': '8'}]
+	assert not grounded(hf, read('https://huggingface.co/datasets/someone/weblinx-copy', 'WebLINX has 8 splits'))
+	assert grounded(hf, read('https://huggingface.co/api/datasets/McGill-NLP/WebLINX', '"splits": 8'))
+	paper = [{'url': 'https://arxiv.org/abs/2306.06070', 'value': '137'}]
+	assert not grounded(paper, read('https://arxiv.org/search/?query=137&searchtype=all', 'Showing results for 137: no results'))
+	assert grounded(paper, read('https://arxiv.org/search/?query=mind2web', 'Mind2Web ... collected from 137 websites'))  # a real listing still counts
+
+
 def test_digits_inside_identifiers_are_not_numbers():
 	from rl_env_use.graders import numbers
 
